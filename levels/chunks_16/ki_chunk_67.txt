@@ -1,0 +1,16 @@
+X-----XXXXXXXX-X
+X-----XX-------X
+X--XXXXX-------X
+X--X------XXXXXX
+X--X----------XX
+XT-X----------XX
+X--X-XXXX-----XX
+X--X----------XX
+X-TX----------XX
+X--X-----XXXX-XX
+X--X----------XX
+XT-X----------XX
+X--DXXXX------XX
+X--D----------XX
+X-TX-----------X
+X--X----XXXX---X
