@@ -9,6 +9,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+from model import load_model, get_model
 
 
 from parser import *
@@ -61,68 +62,6 @@ mapping_rev = {
     }
 
 
-class Flatten(nn.Module):
-    def forward(self, input):
-        return input.view(input.size(0), -1)
-
-class UnFlatten(nn.Module):
-    def forward(self, input, size=512):
-        return input.view(input.size(0), size, 1, 1)
-
-class VAE(nn.Module):
-    def __init__(self, nc=16, h_dim=512, z_dim=64):
-        super(VAE, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(nc, 64, kernel_size=4, stride=2),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64,128,kernel_size=4,stride=2),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2),
-            Flatten()
-        )
-        self.fc1 = nn.Linear(h_dim, z_dim)
-        self.fc2 = nn.Linear(h_dim, z_dim)
-        self.fc3 = nn.Linear(z_dim, h_dim)
-
-        self.decoder = nn.Sequential(
-            UnFlatten(),
-            nn.ConvTranspose2d(h_dim, 128, kernel_size=4, stride=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128,64,kernel_size=4,stride=2,padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, nc, kernel_size=4, stride=2,padding=1),
-            nn.Sigmoid()
-        )
-
-    def reparametrize(self, mu, logvar):
-        std = logvar.mul(0.5).exp_()
-        esp = torch.randn(*mu.size())
-        z = mu + std * esp
-        return z
-
-    def bottleneck(self, h):
-        mu, logvar = self.fc1(h), self.fc2(h)
-        z = self.reparametrize(mu, logvar)
-        return z, mu, logvar
-
-    def encode(self, x):
-        h = self.encoder(x)
-        z, mu, logvar = self.bottleneck(h)
-        return z, mu, logvar
-
-    def decode(self, z):
-        z = self.fc3(z)
-        z = self.decoder(z)
-        return z
-
-    def forward(self, x):
-        z, mu, logvar = self.encode(x)
-        z = self.decode(z)
-        return z, mu, logvar
-
 nz = 64
 nc = 16
 
@@ -146,9 +85,8 @@ def get_z_from_file(f):
 
     return z_1
 
-path = 'vae_ng_64/vae_ng_64_final.pth'
-model = VAE(nc)
-model.load_state_dict(torch.load(path, map_location=lambda storage, loc: storage))
+path = 'vae_ng_64_final.pth'
+model = load_model(nc,nz)
 
 def compute_density(z):
     z_decoded = model.decode(z)
@@ -163,7 +101,7 @@ def compute_density(z):
         total += len(line[line == 11]) # T
         total += len(line[line == 12]) # M
         total += len(line[line == 14]) # #
-    return ((total*100)/128)
+    return ((total*100)/256)
 
 def compute_difficulty(z):
     z_decoded = model.decode(z)
@@ -192,16 +130,6 @@ def compute_proportions(z):
     non_back = 256 - back
     return (smb/non_back, ki/non_back)
 
-"""
-outfile = open('density_metrics.csv','w')
-for f in os.listdir('levels/chunks_ng/'):
-    # print('levels/chunks_ng/'+f)
-    #print(f)
-    z = get_z_from_file('levels/chunks_ng/'+f)
-    #print(f,compute_density(z))
-    outfile.write(f + ',' + str(compute_density(z)) + '\n')
-outfile.close()
-"""
 
 def get_metrics(f):
     density, difficulty, smb, ki, back = 0, 0, 0, 0, 0
@@ -217,26 +145,62 @@ def get_metrics(f):
                 smb += 1
             if l in ['#','T','M','D','H']:
                 ki += 1
-    density = (density*100)/128
+    density = (density*100)/256
     difficulty = (difficulty*100)/16
     smb = smb/(256-back)
     ki = ki/(256-back)
     return (density, difficulty, smb, ki)
 
+def density(array):
+    total = 0
+    for line in array[0]:
+        total += len(line[line == 0]) # X
+        total += len(line[line == 1]) # S
+        total += len(line[line == 3]) # Q
+        total += len(line[line == 4]) # ?
+        total += len(line[line == 11]) # T
+        total += len(line[line == 12]) # M
+        total += len(line[line == 14]) # #
+    return ((total*100)/256)
 
-outfile = open('metrics_new.csv','w')
+def difficulty(array):
+    num_eh = 0  # number of enemies and hazards
+    for i, line in enumerate(array[0]):
+        num_eh += len(line[line == 5]) + len(line[line == 15])
+    return num_eh / 16 * 100
+
+
+def proportions(array):
+    smb, ki, back = 0, 0, 0
+    for line in array[0]:
+        for tile in line:
+            if tile != 2:
+                if tile < 11:
+                    smb += 1
+                else:
+                    ki += 1
+            else:
+                back += 1
+    non_back = 256 - back
+    return (smb/non_back, ki/non_back)
+
+outfile = open('random_alt.csv','w')
+outfile.write('Vector,Density,Difficulty,SMB,KI\n')
+for i in range(10000):
+    lv = torch.FloatTensor(1, nz).normal_().mul_(1)
+    z_decoded = model.decode(lv)
+    level = z_decoded.data.cpu().numpy()
+    sc = np.argmax( level, axis = 1)
+    prop = proportions(sc)
+    outfile.write(str(i) + ',' + str(density(sc)) + ',' + str(difficulty(sc)) + ',' + str(prop[0]) + ',' + str(prop[1]) + '\n')
+outfile.close()
+
+sys.exit()
+outfile = open('metrics_newer.csv','w')
 outfile.write('Chunk,Density,Difficulty,SMB,KI\n')
 for f in os.listdir('levels/chunks_ng/'):
     # print(f)
     z = get_z_from_file('levels/chunks_ng/'+f)
     density, difficulty, smb, ki = get_metrics('levels/chunks_ng/'+f)
     outfile.write(f + ',' + str(density) + ',' + str(difficulty) + ',' + str(smb) + ',' + str(ki) + '\n')
-outfile.close()
-
-outfile = open('random_newest.csv','w')
-outfile.write('Vector,Density,Difficulty,SMB,KI\n')
-for i in range(10000):
-    z = torch.FloatTensor(1, nz).normal_(0,1)
-    density, difficulty, prop = compute_density(z), compute_difficulty(z), compute_proportions(z)
-    outfile.write(str(i) + ',' + str(density) + ',' + str(difficulty) + ',' + str(prop[0]) + ',' + str(prop[1]) + '\n')
 outfile.close()

@@ -1,0 +1,16 @@
+XXXXXXXX********
+X***XXXXXXXX****
+X*******XXXXXXXX
+X***********XXXX
+X*************XX
+X*************XX
+X***XXXX******DX
+X***XXXXXXXX**DX
+XX******XXXXXXXX
+XX**********XXXX
+XX***********XXX
+XXXXXXXXXX***XXX
+XXXX***********X
+XXXX***********X
+*********XXXX**X
+XX*******XX***XX

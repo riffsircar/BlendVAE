@@ -1,7 +1,3 @@
-# This generator program expands a low-dimentional latent vector into a 2D array of tiles.
-# Each line of input should be an array of z vectors (which are themselves arrays of floats -1 to 1)
-# Each line of output is an array of 32 levels (which are arrays-of-arrays of integer tile ids)
-
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -12,6 +8,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+import os
 
 import cma
 import sys
@@ -22,6 +19,14 @@ import math
 import random
 
 from PIL import Image
+from scipy.spatial import distance
+from sklearn import linear_model
+from sklearn.metrics import mean_squared_error
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+from igraph import *
+import rasterfairy
 
 mapping = {
     0: "X",
@@ -39,7 +44,8 @@ mapping = {
     12: "M",
     13: "D",
     14: "#",
-    15: "H"
+    15: "H",
+    16: "*"
     }
 
 mapping_rev = {
@@ -58,12 +64,12 @@ mapping_rev = {
     "M": 12,
     "D": 13,
     "#": 14,
-    "H": 15
+    "H": 15,
+    "*": 16
     }
 
 
 images = {
-    # TODO: Get T, D, M tiles from Icarus
     "E": Image.open('tiles/E.png'),
     "H": Image.open('tiles/H.png'),
     "G": Image.open('tiles/G.png'),
@@ -81,81 +87,11 @@ images = {
     "<": Image.open('tiles/PTL.png'),
     ">": Image.open('tiles/PTR.png'),
     "[": Image.open('tiles/[.png'),
-    "]": Image.open('tiles/].png')
+    "]": Image.open('tiles/].png'),
+    "*": Image.open('tiles/0.png')
     }
 
-level_data = "levels_ng_16.json"
-X = np.array(json.load(open(level_data)))
-nc = 16
-# print("SHAPE: ", X.shape)
-X_onehot = np.eye(nc, dtype='uint8')[X]
-# print(X_onehot.shape)
-X_onehot = np.rollaxis(X_onehot, 3, 1)
-# print("SHAPE onehot: ", X_onehot.shape)
-X_train = X_onehot
-# print(X_train.shape)
-
-class Flatten(nn.Module):
-    def forward(self, input):
-        return input.view(input.size(0), -1)
-
-class UnFlatten(nn.Module):
-    def forward(self, input, size=512):
-        return input.view(input.size(0), size, 1, 1)
-
-class VAE(nn.Module):
-    def __init__(self, nc=16, h_dim=512, z_dim=64):
-        super(VAE, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(nc, 64, kernel_size=4, stride=2),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64,128,kernel_size=4,stride=2),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2),
-            Flatten()
-        )
-        self.fc1 = nn.Linear(h_dim, z_dim)
-        self.fc2 = nn.Linear(h_dim, z_dim)
-        self.fc3 = nn.Linear(z_dim, h_dim)
-
-        self.decoder = nn.Sequential(
-            UnFlatten(),
-            nn.ConvTranspose2d(h_dim, 128, kernel_size=4, stride=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128,64,kernel_size=4,stride=2,padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, nc, kernel_size=4, stride=2,padding=1),
-            nn.Sigmoid()
-        )
-
-    def reparametrize(self, mu, logvar):
-        std = logvar.mul(0.5).exp_()
-        esp = torch.randn(*mu.size())
-        z = mu + std * esp
-        return z
-
-    def bottleneck(self, h):
-        mu, logvar = self.fc1(h), self.fc2(h)
-        z = self.reparametrize(mu, logvar)
-        return z, mu, logvar
-
-    def encode(self, x):
-        h = self.encoder(x)
-        z, mu, logvar = self.bottleneck(h)
-        return z, mu, logvar
-
-    def decode(self, z):
-        z = self.fc3(z)
-        z = self.decoder(z)
-        return z
-
-    def forward(self, x):
-        z, mu, logvar = self.encode(x)
-        z = self.decode(z)
-        return z, mu, logvar
+nc = 17
 
 def combine_images(generated_images):
     num = generated_images.shape[0]
@@ -170,8 +106,8 @@ def combine_images(generated_images):
     return image
 
 
-nz = 64
-out_folder = 'results/'
+nz = 32
+out_folder = 'mlcd/'
 
 def get_z_from_file(f):
     chunk_1 = open(f, 'r').read().splitlines()
@@ -182,7 +118,6 @@ def get_z_from_file(f):
         line_list_map = [mapping_rev[x] for x in line_list]
         out_1.append(line_list_map)
     out_1 = np.asarray(out_1)
-    print(out_1, out_1.shape)
     out1_onehot = np.eye(nc, dtype='uint8')[out_1]
     out1_onehot = np.rollaxis(out1_onehot, 2, 0)
 
@@ -245,9 +180,7 @@ def interpolate_random(num_linp=30):
         output = Image.new('RGB',(16*16, 16*16))
         for i in im:
             for row, seg in enumerate(i):
-            #print(row,seg)
                 for col, tile in enumerate(seg):
-                #print(col, tile)
                     output.paste(images[mapping[tile]],(col*16, row*16))
             output.save(out_folder + "rand_chunk_" + str(idx) + ".png")
 
@@ -256,7 +189,6 @@ def output_image(z, name):
     level = model.decode(z)
     im = level.data.cpu().numpy()
     im = np.argmax(im, axis=1)
-    # print("Im: ", im)
     output = Image.new('RGB',(16 * 16, 16 * 16))
     for i in im:
         for row, seg in enumerate(i):
@@ -264,6 +196,18 @@ def output_image(z, name):
                 output.paste(images[mapping[tile]],(col*16, row*16))
         output.save(out_folder + name + ".png")
     
+def get_image(z):
+    latent_vector = torch.FloatTensor(z).view(1, nz)
+    level = model.decode(latent_vector)
+    im = level.data.cpu().numpy()
+    im = np.argmax(im, axis=1)
+    output = Image.new('RGB',(16 * 16, 16 * 16))
+    for i in im:
+        for row, seg in enumerate(i):
+            for col, tile in enumerate(seg):
+                output.paste(images[mapping[tile]],(col*16, row*16))
+    return output
+
 
 def add_chunks(chunk_1, chunk_2):
     z_1, z_2 = get_z_from_file(chunk_1), get_z_from_file(chunk_2)
@@ -315,15 +259,6 @@ def pattern_variation(level, patterns):
 
     return(len(variety)/len(level))
 
-"""
-def gan_fitness_function(x):
-    x = np.array(x)
-    latent_vector = torch.FloatTensor(x).view(batchSize, nz, 1, 1)  # torch.from_numpy(lv)# torch.FloatTensor( torch.from_numpy(lv) )
-    with torch.no_grad():
-        levels = generator(latent_vector)
-    levels.data = levels.data[:, :, :16, :16]
-    return solid_blocks_fraction(levels.data, 0.4)*ground_blocks_fraction(levels.data,0.8)
-"""
 
 def optimize(fn):
     es = cma.CMAEvolutionStrategy(nz * [0], 0.5)
@@ -333,14 +268,14 @@ def optimize(fn):
     latent_vector = torch.FloatTensor(best).view(1, nz)
     output_image(latent_vector, "optimized")
     cma.plot()
-    
 
 def density(x, p=1.0):
     total = 0
     z = torch.FloatTensor(x).view(1, nz)
-    z_decoded = model.decode(z)
-    level = z_decoded.data.cpu().numpy()
-    level = np.argmax( level, axis = 1)
+    #z_decoded = model.decode(z)
+    #level = z_decoded.data.cpu().numpy()
+    #level = np.argmax( level, axis = 1)
+    level = np.argmax(model.decoder(model.fc3(z)).detach().numpy(), axis=1)
     for line in level[0]:
         total += len(line[line == 0]) # X
         total += len(line[line == 1]) # S
@@ -349,8 +284,40 @@ def density(x, p=1.0):
         total += len(line[line == 11]) # T
         total += len(line[line == 12]) # M
         total += len(line[line == 14]) # #
-        
-    return math.fabs(128*p - total)
+    return math.fabs(256*p - total)
+
+def nonlinearity(x,p=1.0,flag=False):
+    z = torch.FloatTensor(x).view(1,nz)
+    level = np.argmax(model.decoder(model.fc3(z)).detach().numpy(), axis=1)
+    level_t = level[0].transpose()
+    x = np.arange(16)
+    y = []
+    for i, arr in enumerate(level_t):
+        appended = False
+        for j, a in enumerate(arr):
+            if a in [0,1,3,4,11,12,14]:
+                y.append(15-j)
+                appended = True
+                break
+        if not appended:
+            y.append(0)
+    x = x.reshape(-1,1)
+    y = np.asarray(y)
+    
+    reg = linear_model.LinearRegression()
+    reg.fit(x,y)
+    y_pred = reg.predict(x)
+    mse = mean_squared_error(y,y_pred)
+    return math.fabs(56.25*p - mse)
+
+def difficulty(x, p=1.0):
+    e, g = 0, 0
+    z = torch.FloatTensor(x).view(1, nz)
+    level = np.argmax(model.decoder(model.fc3(z)).detach().numpy(), axis=1)
+    num_eh, num_gap = 0, 0
+    for i, line in enumerate(level[0]):
+        num_eh += len(line[line == 5]) + len(line[line == 15])
+    return math.fabs(16*p - num_eh)
 
 
 def eval_density(p):
@@ -477,18 +444,6 @@ def optimize_tile_type(p):
     print ("BEST ", best)
     latent_vector = torch.FloatTensor(best).view(1, nz)
     output_image(latent_vector, "tile_type_" + str(p))
-    
-
-def difficulty(x, p=1.0):
-    e, g = 0, 0
-    z = torch.FloatTensor(x).view(1, nz)
-    z_decoded = model.decode(z)
-    level = z_decoded.data.cpu().numpy()
-    level = np.argmax( level, axis = 1)
-    num_eh, num_gap = 0, 0
-    for i, line in enumerate(level[0]):
-        num_eh += len(line[line == 5]) + len(line[line == 15])
-    return math.fabs(16*p - (num_eh))
 
 def optimize_both(p):
     es = cma.CMAEvolutionStrategy(nz * [0], 0.5)
@@ -541,9 +496,6 @@ def both_percent(x, p=1.0):
     non_back = 256 - back
     prop_ki = 0 if non_back == 0 else (ki/non_back)
     prop_smb = 0 if non_back == 0 else (smb/non_back)
-    #return -1.0*((1-p)*prop_ki + (p*prop_smb))
-    #return math.fabs(non_back - ((1-p)*prop_ki + (p*prop_smb)))
-    #return math.fabs((1-p)*prop_ki - (p*prop_smb))
     return (1.0 - ((1-p)*prop_ki + (p*prop_smb)))
 
 def blend_dense(x, p=1.0):
@@ -577,7 +529,6 @@ def blend_dense(x, p=1.0):
 
 def smb_percent(x, p=1.0):
     z = torch.FloatTensor(x).view(1,nz)
-    #z = torch.FloatTensor(1, nz).normal_(0,1)
     z_decoded = model.decode(z)
     level = z_decoded.data.cpu().numpy()
     level = np.argmax( level, axis = 1)
@@ -593,13 +544,10 @@ def smb_percent(x, p=1.0):
             else:
                 back += 1
     non_back = 256 - back
-    # print((smb*100)/non_back, (ki*100)/non_back)
-    #print(math.fabs(p-(smb/non_back)))
     return math.fabs(p-(smb/non_back))
 
 def ki_percent(x, p=1.0):
     z = torch.FloatTensor(x).view(1,nz)
-    #z = torch.FloatTensor(1, nz).normal_(0,1)
     z_decoded = model.decode(z)
     level = z_decoded.data.cpu().numpy()
     level = np.argmax( level, axis = 1)
@@ -614,71 +562,743 @@ def ki_percent(x, p=1.0):
             else:
                 back += 1
     non_back = 256 - back
-    # print((smb*100)/non_back, (ki*100)/non_back)
-    #print(math.fabs(p-(smb/non_back)))
     return math.fabs(p-(ki/non_back))
 
 
 if __name__ == '__main__':
-    path = 'vae_ng_64_final.pth'
-    #path = 'vae_beta/vae_beta_final.pth'
-    #path = 'vae_20K/vae_20K_final.pth'
-    model = VAE(nc)
-    model.load_state_dict(torch.load(path, map_location=lambda storage, loc: storage))
+    path = 'vae_smb_final.pth'
+    model = load_model(path,nc)
+
+    path = 'vae_ki_final.pth'
+    model_ki = load_model(path,nc)
+    model_ki.load_state_dict(torch.load(path, map_location=lambda storage, loc: storage))
+
+    path = 'vae_both_final.pth'
+    model_both = load_model(path,nc)
+    model_both.load_state_dict(torch.load(path, map_location=lambda storage, loc: storage))
+
+    model = model_ki
+    model.eval()
+    i = 0
+    ki_chunks = {}
+    smb_chunks = {}
+    
+    # TSNE Visualization
+    for file in os.listdir('levels/chunks_icarus/'):
+        z = get_z_from_file('levels/chunks_icarus/' + file)
+        ki_chunks[file] = z
+        #smb_chunks[file] = z
+        #output_image(z, 'test_' + str(i) + '.png')
+        i += 1
+    #print(ki_chunks)
+    #interpolate_chunks('levels/chunks_icarus/ki_chunk_0.txt','levels/chunks_icarus/ki_chunk_75.txt',5)
+    #sys.exit()
+    ki_array = []
+    for kc in ki_chunks:
+        ki_array.append(ki_chunks[kc].view(32).detach().numpy())
+    #print(len(ki_array), type(ki_array[0]), ki_array[0], ki_array[0].size, ki_array[0].shape)
+    ki_array = np.array(ki_array)
+    print(type(ki_array[0]), ki_array[0].shape, ki_array[0])
+    print(type(ki_array), ki_array.shape)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(ki_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(ki_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    #print(full_image)
+    #full_image.save('full_image.png')
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_ki.png',full_image)
+    nx, ny = 20, 10
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(ki_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_ki.png',grid_image)
+
+    sampled_chunks = torch.FloatTensor(200, 32).normal_().mul_(1).to('cpu')
+    sampled_ki_array = []
+    for sc in sampled_chunks:
+        sampled_ki_array.append(sc.view(32).detach().numpy())
+    sampled_ki_array = np.array(sampled_ki_array)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(sampled_ki_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(sampled_ki_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    print(full_image)
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_ki_sampled.png',full_image)
+
+    nx, ny = 20, 10
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(sampled_ki_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_ki_sampled.png',grid_image)
+
+    
+    # CONSTRUCTING KNN GRAPH
+    kNN = 5
+    ki_graph = Graph(directed=True)
+    for kc in ki_chunks:
+        ki_graph.add_vertex(kc)
+
+    for i in ki_chunks:
+        distances, names = [], []
+        for j in ki_chunks:
+            z_i, z_j = ki_chunks[i], ki_chunks[j]
+            z_i_d, z_j_d = z_i.detach().numpy(), z_j.detach().numpy()
+            distances.append(distance.cosine(z_i_d, z_j_d))
+            names.append(j)
+        idx_knn = sorted(range(len(distances)),key=lambda k: distances[k])[1:kNN+1]
+        for idx in idx_knn:
+            ki_graph.add_edge(i, names[idx], weight=distances[idx])
+        
+    print("KI_GRAPH: ", ki_graph)
+    summary(ki_graph)
+    idx1 = random.choice(list(ki_chunks))
+    idx2 = random.choice(list(ki_chunks))
+    print(idx1, idx2)
+    path = ki_graph.get_shortest_paths(idx1, to=idx2, mode=OUT, output='vpath',weights='weight')[0]
+    for i,p in enumerate(path):
+        z = ki_chunks[names[p]]
+        output_image(z, 'ki_path_' + str(i))
+
+    
+    # CLOSEST FURTHEST ANALYSES
+    cosine_dists, nonlins, denses, diffs = [], [], [], []
+    sampled_cosine_dists, sampled_nonlins, sampled_denses, sampled_diffs = [], [], [], []
+    max_cd, max_nl, max_dens, max_diff = float('-inf'),float('-inf'),float('-inf'),float('-inf')
+    min_cd, min_nl, min_dens, min_diff = float('inf'),float('inf'),float('inf'),float('inf')
+    max_cd_z, min_cd_z, max_nl_z, min_nl_z, max_dens_z, min_dens_z, max_diff_z, min_diff_z = None,None,None,None,None,None,None,None
+    z_0 = ki_chunks['ki_chunk_0.txt']
+    z_orig = z_0
+    z_0 = z_0.detach().numpy()
+    nl_0 = nonlinearity(z_0)
+    diff_0 = difficulty(z_0)
+    dens_0 = density(z_0)
+    for k in ki_chunks:
+        if k == 'ki_chunk_0.txt':
+            continue
+        z = ki_chunks[k]
+        z = z.detach().numpy()
+        nl, diff, dens = nonlinearity(z), difficulty(z), density(z)
+        nl_diff, diff_diff, dens_diff = math.fabs(nl - nl_0), math.fabs(diff - diff_0), math.fabs(dens - dens_0)
+        cd = distance.cosine(z_0,z)
+        if cd > max_cd:
+            max_cd = cd
+            max_cd_z = ki_chunks[k]
+        elif cd < min_cd:
+            min_cd = cd
+            min_cd_z = ki_chunks[k]
+
+        if nl_diff > max_nl:
+            max_nl = nl_diff
+            max_nl_z = ki_chunks[k]
+        elif nl_diff < min_nl:
+            min_nl = nl_diff
+            min_nl_z = ki_chunks[k]
+
+        if diff_diff > max_diff:
+            max_diff = diff_diff
+            max_diff_z = ki_chunks[k]
+        elif diff_diff < min_diff:
+            min_diff = diff_diff
+            min_diff_z = ki_chunks[k]
+
+        if dens_diff > max_dens:
+            max_dens = dens_diff
+            max_dens_z = ki_chunks[k]
+        elif dens_diff < min_dens:
+            min_dens = dens_diff
+            min_dens_z = ki_chunks[k]
+        
+
+    output_image(z_orig, 'ki_0')
+    print(type(z_orig))
+    print(type(min_cd_z), min_cd_z, min_cd_z.shape)
+    output_image(min_cd_z, 'ki_0_cosine_closest')
+    output_image(max_cd_z, 'ki_0_cosine_farthest')
+    output_image(min_nl_z, 'ki_0_nonlinearity_closest')
+    output_image(max_nl_z, 'ki_0_nonlinearity_farthest')
+    output_image(min_dens_z, 'ki_0_density_closest')
+    output_image(max_dens_z, 'ki_0_density_farthest')
+    output_image(min_diff_z, 'ki_0_difficulty_closest')
+    output_image(max_diff_z, 'ki_0_difficulty_farthest')
+
+    max_cd, max_nl, max_dens, max_diff = float('-inf'),float('-inf'),float('-inf'),float('-inf')
+    min_cd, min_nl, min_dens, min_diff = float('inf'),float('inf'),float('inf'),float('inf')
+    max_cd_z, min_cd_z, max_nl_z, min_nl_z, max_dens_z, min_dens_z, max_diff_z, min_diff_z = None,None,None,None,None,None,None,None
+    sampled_chunks = torch.FloatTensor(10000, 32).normal_().mul_(1).to('cpu')
+    for sc in sampled_chunks:
+        sc = sc.view(1,nz)
+        nl, diff, dens = nonlinearity(sc), difficulty(sc), density(sc)
+        nl_diff, diff_diff, dens_diff = math.fabs(nl - nl_0), math.fabs(diff - diff_0), math.fabs(dens - dens_0)
+        sc_d = sc.detach().numpy()
+        cd = distance.cosine(z_0,sc_d)
+        if cd > max_cd:
+            max_cd = cd
+            max_cd_z = sc
+        elif cd < min_cd:
+            min_cd = cd
+            min_cd_z = sc
+
+        if nl_diff > max_nl:
+            max_nl = nl_diff
+            max_nl_z = sc
+        elif nl_diff < min_nl:
+            min_nl = nl_diff
+            min_nl_z = sc
+
+        if diff_diff > max_diff:
+            max_diff = diff_diff
+            max_diff_z = sc
+        elif diff_diff < min_diff:
+            min_diff = diff_diff
+            min_diff_z = sc
+
+        if dens_diff > max_dens:
+            max_dens = dens_diff
+            max_dens_z = sc
+        elif dens_diff < min_dens:
+            min_dens = dens_diff
+            min_dens_z = sc
+
+    output_image(min_cd_z, 'ki_0_sampled_cosine_closest')
+    output_image(max_cd_z, 'ki_0_sampled_cosine_farthest')
+    output_image(min_nl_z, 'ki_0_sampled_nonlinearity_closest')
+    output_image(max_nl_z, 'ki_0_sampled_nonlinearity_farthest')
+    output_image(min_dens_z, 'ki_0_sampled_density_closest')
+    output_image(max_dens_z, 'ki_0_sampled_density_farthest')
+    output_image(min_diff_z, 'ki_0_sampled_difficulty_closest')
+    output_image(max_diff_z, 'ki_0_sampled_difficulty_farthest')
+
+    
+    sampled_chunks = torch.FloatTensor(1000, 32).normal_().mul_(1).to('cpu')
+    kNN = 10
+    ki_sampled_graph = Graph(directed=True)
+    ki_sampled_graph.add_vertices(len(sampled_chunks))
+
+    for i in range(len(sampled_chunks)):
+        distances = []
+        for j in range(len(sampled_chunks)):
+            z_i, z_j = sampled_chunks[i].view(1,32), sampled_chunks[j].view(1,32)
+            z_i_d, z_j_d = z_i.detach().numpy(), z_j.detach().numpy()
+            distances.append(distance.cosine(z_i_d, z_j_d))
+        idx_knn = sorted(range(len(distances)),key=lambda k: distances[k])[1:kNN+1]
+        for idx in idx_knn:
+            ki_sampled_graph.add_edge(i, idx, weight=distances[idx])
+        
+    print("KI_SAMP_GRAPH: ", ki_sampled_graph)
+    summary(ki_sampled_graph)
+    idx1 = int(len(sampled_chunks) * random.random())
+    idx2 = int(len(sampled_chunks) * random.random())
+    print(idx1, idx2)
+    path = ki_sampled_graph.get_shortest_paths(idx1, to=idx2, mode=OUT, output='vpath',weights='weight')[0]
+    for i,p in enumerate(path):
+        z = sampled_chunks[p].view(1,nz)
+        output_image(z, 'ki_sampled_path_' + str(i))
+    
+    # REPEAT FOR SMB
+    model = model_smb
+    model.eval()
+    i = 0
+    for file in os.listdir('levels/chunks_mario/'):
+        z = get_z_from_file('levels/chunks_mario/' + file)
+        smb_chunks[file] = z
+        i += 1
+    
+    smb_array = []
+    for kc in smb_chunks:
+        smb_array.append(smb_chunks[kc].view(32).detach().numpy())
+    smb_array = np.array(smb_array)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(smb_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(smb_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_mario.png',full_image)
+    
+    nx, ny = 20, 10
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(smb_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_smb.png',grid_image)
+
+    sampled_chunks = torch.FloatTensor(200, 32).normal_().mul_(1).to('cpu')
+    sampled_smb_array = []
+    for sc in sampled_chunks:
+        sampled_smb_array.append(sc.view(32).detach().numpy())
+    sampled_smb_array = np.array(sampled_smb_array)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(sampled_smb_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(sampled_smb_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    print(full_image)
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_smb_sampled.png',full_image)
+
+    nx, ny = 20, 10
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(sampled_smb_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_smb_sampled.png',grid_image)
+
+    # REPEAT FOR COMBINED MODEL
+    model = model_both
+    model.eval()
+    i = 0
+    all_chunks = {}
+    for file in os.listdir('levels/chunks_mario/'):
+        z = get_z_from_file('levels/chunks_mario/' + file)
+        all_chunks[file] = z
+        i += 1
+
+    for file in os.listdir('levels/chunks_icarus/'):
+        z = get_z_from_file('levels/chunks_icarus/' + file)
+        all_chunks[file] = z
+        i += 1
+    
+    all_array = []
+    for kc in all_chunks:
+        all_array.append(all_chunks[kc].view(32).detach().numpy())
+    all_array = np.array(all_array)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(all_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(all_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_both.png',full_image)
+    
+    nx, ny = 27, 14
+    print("Transforming...")
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+    print("After transforming...")
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(all_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_both.png',grid_image)
+
+    sampled_chunks = torch.FloatTensor(200, 32).normal_().mul_(1).to('cpu')
+    sampled_both_array = []
+    for sc in sampled_chunks:
+        sampled_both_array.append(sc.view(32).detach().numpy())
+    sampled_both_array = np.array(sampled_both_array)
+    tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(sampled_both_array)                                                                                                   
+    tx, ty = tsne[:,0], tsne[:,1]
+    tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+    ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+    width = 2000
+    height = 2000
+    max_dim = 100
+
+    full_image = Image.new('RGBA', (width, height))
+    for z, x, y in zip(sampled_both_array, tx, ty):
+        tile = get_image(z)
+        rs = max(1, tile.width/max_dim, tile.height/max_dim)
+        tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+        full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(full_image)
+    plt.imsave('plot_both_sampled.png',full_image)
+
+    nx, ny = 20, 10
+    grid_assignment = rasterfairy.transformPointCloud2D(tsne, target=(nx, ny))
+
+    tile_width = 72
+    tile_height = 56
+
+    full_width = tile_width * nx
+    full_height = tile_height * ny
+    aspect_ratio = float(tile_width) / tile_height
+
+    grid_image = Image.new('RGB', (full_width, full_height))
+
+    for z, grid_pos in zip(sampled_both_array, grid_assignment[0]):
+        idx_x, idx_y = grid_pos
+        x, y = tile_width * idx_x, tile_height * idx_y
+        tile = get_image(z)
+        tile_ar = float(tile.width) / tile.height  # center-crop the tile to match aspect_ratio
+        if (tile_ar > aspect_ratio):
+            margin = 0.5 * (tile.width - aspect_ratio * tile.height)
+            tile = tile.crop((margin, 0, margin + aspect_ratio * tile.height, tile.height))
+        else:
+            margin = 0.5 * (tile.height - float(tile.width) / aspect_ratio)
+            tile = tile.crop((0, margin, tile.width, margin + float(tile.width) / aspect_ratio))
+        tile = tile.resize((tile_width, tile_height), Image.ANTIALIAS)
+        grid_image.paste(tile, (int(x), int(y)))
+
+    plt.figure(figsize = (16,12))
+    plt.imshow(grid_image)
+    plt.imsave('grid_both_sampled.png',grid_image)
+    
+    kNN = 5
+    smb_graph = Graph(directed=True)
+    for kc in smb_chunks:
+        smb_graph.add_vertex(kc)
+
+    for i in smb_chunks:
+        distances, names = [], []
+        for j in smb_chunks:
+            z_i, z_j = smb_chunks[i], smb_chunks[j]
+            z_i_d, z_j_d = z_i.detach().numpy(), z_j.detach().numpy()
+            distances.append(distance.cosine(z_i_d, z_j_d))
+            names.append(j)
+        idx_knn = sorted(range(len(distances)),key=lambda k: distances[k])[1:kNN+1]
+        for idx in idx_knn:
+            smb_graph.add_edge(i, names[idx], weight=distances[idx])
+        
+    print("SMB_GRAPH: ", smb_graph)
+    summary(smb_graph)
+    idx1 = random.choice(list(smb_chunks))
+    idx2 = random.choice(list(smb_chunks))
+    print(idx1, idx2)
+    path = smb_graph.get_shortest_paths(idx1, to=idx2, mode=OUT, output='vpath',weights='weight')[0]
+    print(path)
+    for i,p in enumerate(path):
+        z = smb_chunks[names[p]]
+        output_image(z, 'smb_path_' + str(i))
+    sys.exit()
+    """
+    """
+    max_cd, max_nl, max_dens, max_diff = float('-inf'),float('-inf'),float('-inf'),float('-inf')
+    min_cd, min_nl, min_dens, min_diff = float('inf'),float('inf'),float('inf'),float('inf')
+    max_cd_z, min_cd_z, max_nl_z, min_nl_z, max_dens_z, min_dens_z, max_diff_z, min_diff_z = None,None,None,None,None,None,None,None
+    z_0 = smb_chunks['smb_chunk_10.txt']
+    z_orig = z_0
+    z_0 = z_0.detach().numpy()
+    nl_0 = nonlinearity(z_0)
+    diff_0 = difficulty(z_0)
+    dens_0 = density(z_0)
+    for k in smb_chunks:
+        if k == 'smb_chunk_10.txt':
+            continue
+        z = smb_chunks[k]
+        z = z.detach().numpy()
+        nl, diff, dens = nonlinearity(z), difficulty(z), density(z)
+        nl_diff, diff_diff, dens_diff = math.fabs(nl - nl_0), math.fabs(diff - diff_0), math.fabs(dens - dens_0)
+        cd = distance.cosine(z_0,z)
+        if cd > max_cd:
+            max_cd = cd
+            max_cd_z = smb_chunks[k]
+        elif cd < min_cd:
+            min_cd = cd
+            min_cd_z = smb_chunks[k]
+
+        if nl_diff > max_nl:
+            max_nl = nl_diff
+            max_nl_z = smb_chunks[k]
+        elif nl_diff < min_nl:
+            min_nl = nl_diff
+            min_nl_z = smb_chunks[k]
+
+        if diff_diff > max_diff:
+            max_diff = diff_diff
+            max_diff_z = smb_chunks[k]
+        elif diff_diff < min_diff:
+            min_diff = diff_diff
+            min_diff_z = smb_chunks[k]
+
+        if dens_diff > max_dens:
+            max_dens = dens_diff
+            max_dens_z = smb_chunks[k]
+        elif dens_diff < min_dens:
+            min_dens = dens_diff
+            min_dens_z = smb_chunks[k]
+        
+
+    output_image(z_orig, 'smb_10')
+    output_image(min_cd_z, 'smb_10_cosine_closest')
+    output_image(max_cd_z, 'smb_10_cosine_farthest')
+    output_image(min_nl_z, 'smb_10_nonlinearity_closest')
+    output_image(max_nl_z, 'smb_10_nonlinearity_farthest')
+    output_image(min_dens_z, 'smb_10_density_closest')
+    output_image(max_dens_z, 'smb_10_density_farthest')
+    output_image(min_diff_z, 'smb_10_difficulty_closest')
+    output_image(max_diff_z, 'smb_10_difficulty_farthest')
+
+    max_cd, max_nl, max_dens, max_diff = float('-inf'),float('-inf'),float('-inf'),float('-inf')
+    min_cd, min_nl, min_dens, min_diff = float('inf'),float('inf'),float('inf'),float('inf')
+    max_cd_z, min_cd_z, max_nl_z, min_nl_z, max_dens_z, min_dens_z, max_diff_z, min_diff_z = None,None,None,None,None,None,None,None
+    
+    
+    sampled_chunks = torch.FloatTensor(1000, 32).normal_().mul_(1).to('cpu')
+
+    kNN = 10
+    smb_sampled_graph = Graph(directed=True)
+    smb_sampled_graph.add_vertices(len(sampled_chunks))
+
+    for i in range(len(sampled_chunks)):
+        distances = []
+        for j in range(len(sampled_chunks)):
+            z_i, z_j = sampled_chunks[i].view(1,32), sampled_chunks[j].view(1,32)
+            z_i_d, z_j_d = z_i.detach().numpy(), z_j.detach().numpy()
+            distances.append(distance.cosine(z_i_d, z_j_d))
+        idx_knn = sorted(range(len(distances)),key=lambda k: distances[k])[1:kNN+1]
+        for idx in idx_knn:
+            smb_sampled_graph.add_edge(i, idx, weight=distances[idx])
+        
+    print("SMB_SAMP_GRAPH: ", smb_sampled_graph)
+    summary(smb_sampled_graph)
+    idx1 = int(len(sampled_chunks) * random.random())
+    idx2 = int(len(sampled_chunks) * random.random())
+    print(idx1, idx2)
+    path = smb_sampled_graph.get_shortest_paths(idx1, to=idx2, mode=OUT, output='vpath',weights='weight')[0]
+    for i,p in enumerate(path):
+        z = sampled_chunks[p].view(1,nz)
+        output_image(z, 'smb_sampled_path_' + str(i))
+    
+    for sc in sampled_chunks:
+        sc = sc.view(1,nz)
+        nl, diff, dens = nonlinearity(sc), difficulty(sc), density(sc)
+        nl_diff, diff_diff, dens_diff = math.fabs(nl - nl_0), math.fabs(diff - diff_0), math.fabs(dens - dens_0)
+        sc_d = sc.detach().numpy()
+        cd = distance.cosine(z_0,sc_d)
+        if cd > max_cd:
+            max_cd = cd
+            max_cd_z = sc
+        elif cd < min_cd:
+            min_cd = cd
+            min_cd_z = sc
+
+        if nl_diff > max_nl:
+            max_nl = nl_diff
+            max_nl_z = sc
+        elif nl_diff < min_nl:
+            min_nl = nl_diff
+            min_nl_z = sc
+
+        if diff_diff > max_diff:
+            max_diff = diff_diff
+            max_diff_z = sc
+        elif diff_diff < min_diff:
+            min_diff = diff_diff
+            min_diff_z = sc
+
+        if dens_diff > max_dens:
+            max_dens = dens_diff
+            max_dens_z = sc
+        elif dens_diff < min_dens:
+            min_dens = dens_diff
+            min_dens_z = sc
+
+    output_image(min_cd_z, 'smb_10_sampled_cosine_closest')
+    output_image(max_cd_z, 'smb_10_sampled_cosine_farthest')
+    output_image(min_nl_z, 'smb_10_sampled_nonlinearity_closest')
+    output_image(max_nl_z, 'smb_10_sampled_nonlinearity_farthest')
+    output_image(min_dens_z, 'smb_10_sampled_density_closest')
+    output_image(max_dens_z, 'smb_10_sampled_density_farthest')
+    output_image(min_diff_z, 'smb_10_sampled_difficulty_closest')
+    output_image(max_diff_z, 'smb_10_sampled_difficulty_farthest')
+    
+    print(len(cosine_dists))
+    
+    cosine_dists = sorted(cosine_dists)
+    nonlins = sorted(nonlins)
+    denses = sorted(denses)
+    diffs = sorted(diffs)
+
+    sampled_cosine_dists = sorted(sampled_cosine_dists)
+    sampled_nonlins = sorted(sampled_nonlins)
+    sampled_denses = sorted(sampled_denses)
+    sampled_diffs = sorted(sampled_diffs)
+    
+    output_image(sampled_cosine_dists[0], 'ki_0_sampled_cosine_closest.png')
+    output_image(sampled_cosine_dists[189], 'ki_0_sampled_cosine_farthest.png')
+    output_image(sampled_nonlins[0], 'ki_0_sampled_nonlinearity_closest.png')
+    output_image(sampled_nonlins[189], 'ki_0_sampled_nonlinearity_farthest.png')
+    output_image(sampled_denses[0], 'ki_0_sampled_density_closest.png')
+    output_image(sampled_denses[189], 'ki_0_sampled_density_farthest.png')
+    output_image(sampled_diffs[0], 'ki_0_sampled_difficulty_closest.png')
+    output_image(sampled_diffs[189], 'ki_0_sampled_difficulty_farthest.png')
+
+    sys.exit()
 
     z = torch.FloatTensor(1, nz).normal_(0,1)
     level = model.decode(z)
     im = level.data.cpu().numpy()
     im = np.argmax( im, axis = 1)
-    #print(im)
-    #leniency(im)
-    #density(im)
-    #optimize_density(1)
-    #optimize_leniency(1)
-    #optimize_density(0.25)
-    #optimize_both(1)
-    #optimize_both_dense(1)
-    #interpolate_chunks('smb_chunk_15.txt','ki_chunk_187.txt',6)
-    #optimize_both(0.5)
-
-    #optimize_tile_type(4)
-    #optimize_both(1)
-    #blend_chunks('smb_chunk_15.txt', 'ki_chunk_187.txt',0)
-    #optimize_both_dense(0.5)
-    """
-    interpolate_chunks('smb_chunk_15.txt','levels/chunks_ng/smb_chunk_132.txt',20)
-    z = get_z_from_file('levels/chunks_ng/smb_chunk_15.txt')
-    output_image(z, 'smb_chunk_15_test')
-    z = get_z_from_file('levels/chunks_ng/smb_chunk_132.txt')
-    output_image(z, 'smb_chunk_132_test')
-    sys.exit()
-    interpolate_chunks('smb_chunk_15.txt','smb_chunk_20.txt',30)
-    """
-    for i in [1]:
-        eval_both_dense(i)
-
-    """
-    optimize_leniency(0.75)
-    #game_percents(1)
-    optimize_smb(1)
-    optimize_ki(0)
-    interpolate_chunks('custom_smb.txt','custom_ki.txt',30)
     
-    z = get_z_from_file('custom_smb.txt')
-    output_image(z, 'custom_smb_2')
-    z = get_z_from_file('custom_ki.txt')
-    output_image(z, 'custom_ki')
-    
-    interpolate_chunks('smb_chunk_15.txt','ki_chunk_187.txt',30)
-    z = get_z_from_file('smb_chunk_20.txt')
-    output_image(z, 'smb_chunk_20_test')
-    z = get_z_from_file('smb_chunk_15.txt')
-    output_image(z, 'smb_chunk_15_test')
-    z = get_z_from_file('ki_chunk_187.txt')
-    output_image(z, 'ki_chunk_187_chunktest2')
-    interpolate_random()
-    add_chunks_random()
-    """        
-    #optimize(gan_maximize_tile_type)
-    
-
+    interpolate_chunks('levels/chunks_ng/smb_chunk_15.txt','levels/chunks_ng/ki_chunk_187.txt',6)

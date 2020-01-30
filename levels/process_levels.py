@@ -47,7 +47,8 @@ mapping = {
     "M": 12,
     "D": 13,
     "#": 14,
-    "H": 15
+    "H": 15,
+    "*": 16,
     }
 
 
@@ -66,6 +67,22 @@ for offset in range(0,len(mario_data[0])-15):
     for line in mario_data:
         temp_data.append(line[offset:offset+16])
     data.append(temp_data)
+
+
+outdata = []
+for line in data:
+    temp = []
+    for d in line:
+        # temp.append(list(d))
+        d_list = list(d)
+        d_list_map = [mapping[x] for x in d_list]
+        # print d, d_list_map
+        temp.append(d_list_map)
+    outdata.append(temp)
+#print "0: ", outdata[0], "1: ", outdata[1]
+
+#with open('levels_smb.json','w') as outfile:
+#    json.dump(outdata, outfile)
 
 """
 for offset_h in range(0,len(mario_data[0])-7):
@@ -87,12 +104,12 @@ print icarus_data
 
 print len(icarus_data)
 
+#data = []
 for offset in range(0,len(icarus_data)-15):
     temp_data = []
     for line in icarus_data[offset:offset+16]:
         temp_data.append(line)
     data.append(temp_data)
-idat = []
 """
 for offset_v in range(0,len(icarus_data)-7):
     for offset_h in range(0,9):
@@ -124,5 +141,5 @@ for line in data:
     outdata.append(temp)
 #print "0: ", outdata[0], "1: ", outdata[1]
 
-with open('levels_ng_16.json','w') as outfile:
+with open('levels_both.json','w') as outfile:
     json.dump(outdata, outfile)
