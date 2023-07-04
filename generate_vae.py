@@ -28,6 +28,8 @@ import matplotlib.pyplot as plt
 from igraph import *
 import rasterfairy
 
+from model import *
+
 mapping = {
     0: "X",
     1: "S",
@@ -567,7 +569,7 @@ def ki_percent(x, p=1.0):
 
 if __name__ == '__main__':
     path = 'vae_smb_final.pth'
-    model = load_model(path,nc)
+    model_smb = load_model(path,nc)
 
     path = 'vae_ki_final.pth'
     model_ki = load_model(path,nc)

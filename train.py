@@ -91,9 +91,9 @@ if training:
             tot_loss += loss.data.item()/batch_size
             tot_bce += bce.data.item()/batch_size
             tot_kld += kld.data.item()/batch_size
-            optimizer.zero_grad()
+            opt.zero_grad()
             loss.backward()
-            optimizer.step()
+            opt.step()
             i += 1
             
         if epoch % 50 == 0:

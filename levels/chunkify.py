@@ -82,7 +82,7 @@ mario_levels = ['mario-1-1.txt']
 for ml in mario_levels:
     mario_data = open('smb/' + ml,'r').read().splitlines()
     mario_data = [line.replace('\r\n','') for line in mario_data]
-    print "mario data: ", mario_data
+    print("mario data: ", mario_data)
 
     data = []
 
@@ -92,7 +92,7 @@ for ml in mario_levels:
             temp_data.append(line[offset:offset+16])
         data.append(temp_data)
 
-    print len(data), len(data[0]), len(data[0][0])
+    print(len(data), len(data[0]), len(data[0][0]))
 
     for (_, line) in enumerate(data):
         outfile = open('chunks_mario/smb_chunk_' + str(i) + '.txt', 'w')
@@ -110,9 +110,8 @@ ki_levels = ['kidicarus_1.txt']
 for kl in ki_levels:
     icarus_data = open('ki/' + kl,'r').read().splitlines()
     icarus_data = [line.replace('\r\n','') for line in icarus_data]
-    print icarus_data
-
-    print len(icarus_data)
+    print(icarus_data)
+    print(len(icarus_data))
 
     idat = []
     for offset in range(0,len(icarus_data)-15):
@@ -121,7 +120,7 @@ for kl in ki_levels:
             temp_data.append(line)
         idat.append(temp_data)
 
-    print len(idat), len(idat[0]), len(idat[0][0])
+    print(len(idat), len(idat[0]), len(idat[0][0]))
     #print len(data), len(data[0]), len(data[0][0])
     #for d in data:
         #print d
